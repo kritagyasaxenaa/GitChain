@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+backend/.venv/
+backend/.pytest_cache/
+backend/*.db
+
+# C++
+cpp_logic/build/
+*.o
+*.obj
+*.a
+*.so
+
+# Environment
+.env
+
+# OS
+.DS_Store
