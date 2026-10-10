@@ -1,22 +1,22 @@
-# Python
+build/
+dist/
+*.egg-info/
+*.so
+*.whl
+.venv/
+venv/
 __pycache__/
 *.py[cod]
 *.pyo
-.venv/
-venv/
-backend/.venv/
-backend/.pytest_cache/
-backend/*.db
-
-# C++
-cpp_logic/build/
 *.o
 *.obj
 *.a
-*.so
-
-# Environment
+*.db
+.pytest_cache/
+data/
+*.pem
+*.key
+rocksdb-data/
 .env
-
-# OS
 .DS_Store
+**/.vscode/
