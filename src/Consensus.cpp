@@ -4,6 +4,8 @@
 #include <nlohmann/json.hpp>
 #include <rocksdb/options.h>
 #include <rocksdb/write_batch.h>
+#include <algorithm>
+#include <cctype>
 #include <stdexcept>
 
 namespace goc {
@@ -11,12 +13,18 @@ namespace {
 std::string scoreString(const BigInt& v) { return v.convert_to<std::string>(); }
 BigInt parseScore(const std::string& s) { BigInt v=0; for(char c:s){if(c<'0'||c>'9')throw std::runtime_error("Corrupt score in RocksDB");v=v*10+(c-'0');}return v; }
 std::string canonicalKey(std::uint64_t height) { return "canonical:"+std::to_string(height); }
+bool sameTarget(std::string left, std::string right) {
+    std::transform(left.begin(), left.end(), left.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    std::transform(right.begin(), right.end(), right.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return left == right;
+}
 }
 Consensus::Consensus(const std::string& path,std::string chain_id,ChainType type,PostGres* projection)
  :chain_id_(std::move(chain_id)),type_(type),projection_(projection) {
     rocksdb::Options options; options.create_if_missing=true;
     auto status=rocksdb::DB::Open(options,path,&db_); if(!status.ok())throw std::runtime_error("RocksDB open failed: "+status.ToString());
     loadTip();
+    loadState();
 }
 Consensus::~Consensus(){delete db_;}
 void Consensus::setError(std::string* out,const std::string& msg) const { if(out)*out=msg; }
@@ -44,6 +52,7 @@ bool Consensus::validateBlock(const Block& b,std::string* reason) const {
         auto parent=readBlock(b.header.previous_hash); if(!parent){setError(reason,"Unknown parent block; synchronize parent first");return false;}
         if(parent->header.height+1!=b.header.height){setError(reason,"Height does not follow parent");return false;}
         if(parent->header.chain_id!=b.header.chain_id){setError(reason,"Parent belongs to another chain");return false;}
+        if(!sameTarget(parent->header.target_hex,b.header.target_hex)){setError(reason,"Block target must match the genesis target");return false;}
         if(parent->header.timestamp>b.header.timestamp){setError(reason,"Block timestamp precedes parent");return false;}
     }
     // Transaction signature and permission/state validation must be implemented against the parent-state snapshot
@@ -57,8 +66,120 @@ bool Consensus::validateBlock(const Block& b,std::string* reason) const {
     }
     return true;
 }
+bool Consensus::applyTransactions(const Block& block,ChainState& state,std::string* reason) const {
+    const auto roleFor=[&](const std::string& repository,const std::string& actor) {
+        const auto found=state.repository_roles.find({repository,actor});
+        return found==state.repository_roles.end()?std::string{}:found->second;
+    };
+    for(const auto& tx:block.transactions) {
+        try {
+            switch(tx.operation) {
+            case Operation::UserCreate: {
+                const auto username=tx.payload.at("username").get<std::string>();
+                const auto identity_id=tx.payload.at("identity_id").get<std::string>();
+                if(username.empty()||username.size()>64||identity_id!=Crypto::sha256Hex(tx.actor_public_key)) {
+                    setError(reason,"Invalid user registration"); return false;
+                }
+                if(state.users_by_key.contains(tx.actor_public_key)||state.keys_by_username.contains(username)) {
+                    setError(reason,"User key or username is already registered"); return false;
+                }
+                state.users_by_key.emplace(tx.actor_public_key,username);
+                state.keys_by_username.emplace(username,tx.actor_public_key);
+                break;
+            }
+            case Operation::RepoCreate: {
+                const auto repository=tx.payload.at("repository_id").get<std::string>();
+                if(repository.empty()||repository!=tx.repository_id||!state.users_by_key.contains(tx.actor_public_key)) {
+                    setError(reason,"Repository creator must be registered and repository IDs must match"); return false;
+                }
+                if(state.repository_owners.contains(repository)) {
+                    setError(reason,"Repository is already registered"); return false;
+                }
+                state.repository_owners.emplace(repository,tx.actor_public_key);
+                state.repository_roles.emplace(std::make_pair(repository,tx.actor_public_key),"creator");
+                break;
+            }
+            case Operation::AccessRequest: {
+                const auto requested_role=tx.payload.at("requested_role").get<std::string>();
+                if(!state.repository_owners.contains(tx.repository_id)||!state.users_by_key.contains(tx.actor_public_key)||
+                   (requested_role!="admin"&&requested_role!="contributor")) {
+                    setError(reason,"Access request requires a registered user, repository, and valid role"); return false;
+                }
+                break;
+            }
+            case Operation::AccessGrant: {
+                const auto role=roleFor(tx.repository_id,tx.actor_public_key);
+                const auto subject=tx.payload.at("subject_public_key").get<std::string>();
+                const auto granted_role=tx.payload.at("role").get<std::string>();
+                if(role!="creator"&&role!="admin") {
+                    setError(reason,"Only repository creators or admins may grant access"); return false;
+                }
+                if(!state.users_by_key.contains(subject)||(granted_role!="admin"&&granted_role!="contributor")) {
+                    setError(reason,"Access grants require a registered subject and admin or contributor role"); return false;
+                }
+                state.repository_roles[{tx.repository_id,subject}]=granted_role;
+                break;
+            }
+            case Operation::AccessRevoke: {
+                const auto role=roleFor(tx.repository_id,tx.actor_public_key);
+                const auto subject=tx.payload.at("subject_public_key").get<std::string>();
+                const auto subject_role=roleFor(tx.repository_id,subject);
+                if(role!="creator"&&role!="admin") {
+                    setError(reason,"Only repository creators or admins may revoke access"); return false;
+                }
+                if(subject_role.empty()||subject_role=="creator") {
+                    setError(reason,"Access revoke requires an existing non-creator role"); return false;
+                }
+                state.repository_roles.erase({tx.repository_id,subject});
+                break;
+            }
+            case Operation::RuleUpdate: {
+                const auto role=roleFor(tx.repository_id,tx.actor_public_key);
+                if(!state.repository_owners.contains(tx.repository_id)||(role!="creator"&&role!="admin")) {
+                    setError(reason,"Only repository creators or admins may update rules"); return false;
+                }
+                break;
+            }
+            case Operation::FileChange: {
+                const auto role=roleFor(tx.repository_id,tx.actor_public_key);
+                if(role!="creator"&&role!="admin"&&role!="contributor") {
+                    setError(reason,"File changes require a repository role"); return false;
+                }
+                break;
+            }
+            }
+        } catch(const std::exception&) {
+            setError(reason,"Malformed transaction payload"); return false;
+        }
+    }
+    return true;
+}
+void Consensus::loadState() {
+    ChainState restored;
+    if(!tip_hash_.empty()) {
+        std::string expected_parent;
+        for(std::uint64_t height=0;height<=tip_height_;++height) {
+            std::string hash;
+            const auto status=db_->Get(rocksdb::ReadOptions(),canonicalKey(height),&hash);
+            if(!status.ok())throw std::runtime_error("Missing canonical block while restoring chain state: "+status.ToString());
+            const auto block=readBlock(hash);
+            if(!block)throw std::runtime_error("Missing canonical block while restoring chain state: "+hash);
+            std::string reason;
+            if(block->header.height!=height||block->header.previous_hash!=expected_parent)
+                throw std::runtime_error("Canonical block linkage is invalid at height "+std::to_string(height));
+            if(!validateBlock(*block,&reason))
+                throw std::runtime_error("Stored block failed validation at height "+std::to_string(height)+": "+reason);
+            if(!applyTransactions(*block,restored,&reason))
+                throw std::runtime_error("Stored chain violates transaction rules at height "+std::to_string(height)+": "+reason);
+            expected_parent=hash;
+        }
+        if(expected_parent!=tip_hash_)throw std::runtime_error("Canonical tip metadata does not match the chain index");
+    }
+    state_=std::move(restored);
+}
 bool Consensus::persistCandidate(const Block& b,const std::string& hash,const std::string& parent_hash,const BigInt& score) {
     rocksdb::WriteBatch batch; batch.Put(blockKey(hash),blockToJson(b).dump()); batch.Put(scoreKey(hash),scoreString(score)); batch.Put("parent:"+hash,parent_hash);
+    batch.Put(canonicalKey(b.header.height),hash); batch.Put("meta:tip_hash",hash); batch.Put("meta:tip_height",std::to_string(b.header.height));
     // All nodes use integer sqrt and sum; the score is persisted as a decimal integer.
     auto status=db_->Write(rocksdb::WriteOptions(),&batch); if(!status.ok())throw std::runtime_error("RocksDB write failed: "+status.ToString()); return true;
 }
@@ -72,15 +193,16 @@ bool Consensus::receiveBlock(const Block& b,std::string* reason) {
     if(readBlock(b.hash_hex)){setError(reason,"Block already known");return true;}
     const bool extends_tip = (b.header.height==0 && tip_hash_.empty()) || (!tip_hash_.empty() && b.header.previous_hash==tip_hash_);
     if(!extends_tip){setError(reason,"Block must extend the current chain tip");return false;}
+    ChainState next_state=state_;
+    if(!applyTransactions(b,next_state,reason))return false;
     BigInt parent_score=0;
     if(b.header.height>0) parent_score=readScore(b.header.previous_hash);
     BigInt score;
     try { score=parent_score+Crypto::blockScore(b.header.target_hex,b.hash_hex); }
     catch(const std::exception& e){setError(reason,e.what());return false;}
     persistCandidate(b,b.hash_hex,b.header.previous_hash,score);
-    rocksdb::WriteBatch batch; batch.Put(canonicalKey(b.header.height),b.hash_hex); batch.Put("meta:tip_hash",b.hash_hex); batch.Put("meta:tip_height",std::to_string(b.header.height));
-    auto status=db_->Write(rocksdb::WriteOptions(),&batch); if(!status.ok())throw std::runtime_error("Canonical index update failed: "+status.ToString());
     tip_hash_=b.hash_hex; tip_height_=b.header.height; tip_score_=score;
+    state_=std::move(next_state);
     if(projection_) projection_->applyCanonicalBlock(b);
     return true;
 }

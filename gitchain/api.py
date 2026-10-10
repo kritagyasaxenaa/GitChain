@@ -62,7 +62,7 @@ def create_app(
     is_production = service_settings.environment == "production"
     application = FastAPI(
         title="GitChain API",
-        version="0.2.0",
+        version="0.3.0",
         docs_url=None if is_production else "/docs",
         redoc_url=None if is_production else "/redoc",
         openapi_url=None if is_production else "/openapi.json",

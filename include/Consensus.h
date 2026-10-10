@@ -2,6 +2,7 @@
 #include "Block.h"
 #include "Crypto.h"
 #include <rocksdb/db.h>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -40,5 +41,14 @@ private:
     std::string scoreKey(const std::string& hash) const;
     std::optional<Block> readBlock(const std::string& hash) const;
     BigInt readScore(const std::string& hash) const;
+    struct ChainState {
+        std::map<std::string, std::string> users_by_key;
+        std::map<std::string, std::string> keys_by_username;
+        std::map<std::string, std::string> repository_owners;
+        std::map<std::pair<std::string, std::string>, std::string> repository_roles;
+    };
+    ChainState state_;
+    bool applyTransactions(const Block& block, ChainState& state, std::string* reason) const;
+    void loadState();
 };
 }

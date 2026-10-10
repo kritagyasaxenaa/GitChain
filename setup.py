@@ -4,7 +4,7 @@ import shlex
 import subprocess
 
 from pybind11.setup_helpers import Pybind11Extension, build_ext
-from setuptools import find_packages, setup
+from setuptools import setup
 
 
 def pkg_config_flags(*packages: str) -> tuple[list[str], list[str], list[str], list[str], list[str]]:
@@ -40,8 +40,8 @@ def pkg_config_flags(*packages: str) -> tuple[list[str], list[str], list[str], l
 ) = pkg_config_flags("openssl", "rocksdb", "libpqxx")
 
 setup(
-    packages=find_packages("python"),
-    package_dir={"": "python"},
+    packages=["gitchain"],
+    package_dir={"": "."},
     ext_modules=[
         Pybind11Extension(
             "goc_core",

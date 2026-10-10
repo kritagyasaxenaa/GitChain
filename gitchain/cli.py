@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import getpass
+import hmac
 import ipaddress
 import json
 import os
@@ -9,10 +12,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+
 from gitchain.api import _open_engine, create_app
 from gitchain.config import Settings
 
 MAX_JSON_FILE_BYTES = 5 * 1024 * 1024
+IDENTITY_FORMAT = "gitchain-encrypted-identity"
+IDENTITY_AAD = b"gitchain-identity-v1"
 
 
 def _valid_port(value: str) -> int:
@@ -54,6 +63,77 @@ def _write_secret(path: Path, content: str) -> None:
         destination.write("\n")
 
 
+def _prompt_new_passphrase() -> str:
+    passphrase = getpass.getpass("New identity passphrase: ")
+    confirmation = getpass.getpass("Confirm passphrase: ")
+    if not passphrase:
+        raise ValueError("passphrase must not be empty")
+    if not hmac.compare_digest(passphrase.encode("utf-8"), confirmation.encode("utf-8")):
+        raise ValueError("passphrases do not match")
+    return passphrase
+
+
+def _identity_keys(identity: Any) -> dict[str, str]:
+    if not isinstance(identity, dict):
+        raise ValueError("identity file must contain a JSON object")
+    keys = identity.get("keys", identity)
+    if not isinstance(keys, dict):
+        raise ValueError("identity file must contain public and private keys")
+    private_key = keys.get("private_key_pem")
+    public_key = keys.get("public_key_pem")
+    if not isinstance(private_key, str) or not isinstance(public_key, str):
+        raise ValueError("identity file must contain public_key_pem and private_key_pem")
+    return {"private_key_pem": private_key, "public_key_pem": public_key}
+
+
+def _encrypt_identity(identity: dict[str, Any], passphrase: str) -> str:
+    if not passphrase:
+        raise ValueError("passphrase must not be empty")
+    salt = os.urandom(16)
+    nonce = os.urandom(12)
+    key = Scrypt(salt=salt, length=32, n=2**14, r=8, p=1).derive(passphrase.encode("utf-8"))
+    ciphertext = AESGCM(key).encrypt(
+        nonce,
+        json.dumps(identity, separators=(",", ":")).encode("utf-8"),
+        IDENTITY_AAD,
+    )
+    return json.dumps(
+        {
+            "format": IDENTITY_FORMAT,
+            "version": 1,
+            "kdf": "scrypt",
+            "salt": base64.b64encode(salt).decode("ascii"),
+            "cipher": "aes-256-gcm",
+            "nonce": base64.b64encode(nonce).decode("ascii"),
+            "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
+        },
+        indent=2,
+    )
+
+
+def _decrypt_identity(envelope: dict[str, Any], passphrase: str) -> dict[str, Any]:
+    if (
+        envelope.get("format") != IDENTITY_FORMAT
+        or envelope.get("version") != 1
+        or envelope.get("kdf") != "scrypt"
+        or envelope.get("cipher") != "aes-256-gcm"
+    ):
+        raise ValueError("unsupported identity file format")
+    if not passphrase:
+        raise ValueError("passphrase must not be empty")
+    try:
+        salt = base64.b64decode(envelope["salt"], validate=True)
+        nonce = base64.b64decode(envelope["nonce"], validate=True)
+        ciphertext = base64.b64decode(envelope["ciphertext"], validate=True)
+        key = Scrypt(salt=salt, length=32, n=2**14, r=8, p=1).derive(passphrase.encode("utf-8"))
+        identity = json.loads(AESGCM(key).decrypt(nonce, ciphertext, IDENTITY_AAD))
+    except (InvalidTag, KeyError, TypeError, ValueError) as exc:
+        raise ValueError("incorrect passphrase or invalid encrypted identity file") from exc
+    if not isinstance(identity, dict):
+        raise ValueError("decrypted identity is not a JSON object")
+    return identity
+
+
 def _write_output(path: Path, content: str) -> None:
     if str(path) == "-":
         print(content)
@@ -70,17 +150,15 @@ def _load_identity(path: Path) -> dict[str, str]:
     if os.name != "nt" and stat.S_IMODE(file_stat.st_mode) & 0o077:
         raise PermissionError(f"identity file permissions are too broad; run chmod 600 {path}")
     identity = _read_json(path)
-    keys = identity.get("keys", identity)
-    private_key = keys.get("private_key_pem")
-    public_key = keys.get("public_key_pem")
-    if not private_key or not public_key:
-        raise ValueError("identity file must contain public_key_pem and private_key_pem")
-    return {"private_key_pem": private_key, "public_key_pem": public_key}
+    if not isinstance(identity, dict) or identity.get("format") != IDENTITY_FORMAT:
+        raise ValueError("identity file is plaintext; encrypt it with `gitchain protect-identity`")
+    decrypted = _decrypt_identity(identity, getpass.getpass("Identity passphrase: "))
+    return _identity_keys(decrypted)
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="gitchain", description="GitChain node and API tools")
-    parser.add_argument("--version", action="version", version="gitchain 0.2.0")
+    parser.add_argument("--version", action="version", version="gitchain 0.3.0")
     commands = parser.add_subparsers(dest="command", required=True)
 
     serve = commands.add_parser("serve", help="run the FastAPI service")
@@ -130,6 +208,10 @@ def _parser() -> argparse.ArgumentParser:
     keypair = commands.add_parser("generate-keypair", help="generate a keypair and write it securely")
     keypair.add_argument("--output", required=True, type=Path)
 
+    protect = commands.add_parser("protect-identity", help="encrypt an existing plaintext identity file")
+    protect.add_argument("file", type=Path)
+    protect.add_argument("--output", required=True, type=Path)
+
     score = commands.add_parser("score-block", help="calculate the custom score for a target and block hash")
     score.add_argument("target_hex")
     score.add_argument("hash_hex")
@@ -156,7 +238,7 @@ def _run(args: argparse.Namespace) -> int:
         import goc_core
 
         identity = json.loads(goc_core.create_local_identity(args.username))
-        _write_secret(args.output, json.dumps(identity, indent=2))
+        _write_secret(args.output, _encrypt_identity(identity, _prompt_new_passphrase()))
         print(f"identity_id: {identity['identity_id']}")
         print(f"key_file: {args.output}")
         return 0
@@ -165,8 +247,15 @@ def _run(args: argparse.Namespace) -> int:
         import goc_core
 
         keys = json.loads(goc_core.generate_keypair())
-        _write_secret(args.output, json.dumps(keys, indent=2))
+        _write_secret(args.output, _encrypt_identity(keys, _prompt_new_passphrase()))
         print(f"key_file: {args.output}")
+        return 0
+
+    if args.command == "protect-identity":
+        identity = _read_json(args.file)
+        _identity_keys(identity)
+        _write_secret(args.output, _encrypt_identity(identity, _prompt_new_passphrase()))
+        print(f"encrypted_key_file: {args.output}")
         return 0
 
     if args.command == "sign-transaction":

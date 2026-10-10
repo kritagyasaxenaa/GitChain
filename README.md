@@ -10,7 +10,7 @@ For each valid block, with 256-bit target `T` and block hash integer `h`:
 
 `chain_score = sum(block_score)`
 
-The code uses exact integer arithmetic (`boost::multiprecision::cpp_int`) and an integer square root. Blocks must extend the current tip; side branches are rejected. The score is reported for the linear chain and is not used to switch branches.
+The code uses exact integer arithmetic (`boost::multiprecision::cpp_int`) and an integer square root. The genesis block selects the target; every later block must keep it unchanged. Blocks must extend the current tip, and side branches are rejected. The score is reported for the linear chain and is not used to switch branches.
 
 ## Install
 
@@ -39,7 +39,9 @@ python -m pip install .
 
 This builds and installs `goc_core` and the `gitchain` command. `python -m pip install -r requirements-api.txt` installs the project from a checkout as well.
 
-This is a local, single-chain implementation. It does not connect to peers or switch to competing branches. Transactions are signature-checked, but repository roles and permissions are not enforced by consensus. Keep private-key files secure; the CLI stores them as plaintext with owner-only permissions. Do not expose the node to untrusted networks or use it to protect valuable assets.
+Version 0.3 introduces stricter target and transaction rules. Use a fresh RocksDB directory if an older local chain fails state validation during startup; no automatic migration is provided.
+
+This is a local, single-chain implementation without peer networking. Consensus replays canonical transactions from RocksDB and enforces registration, repository ownership, role grants, and file-change permissions. PostgreSQL is an optional libpqxx projection, not consensus authority.
 
 ## File map
 
@@ -63,7 +65,7 @@ gitchain serve --host 127.0.0.1 --port 8000
 
 Block production commands are also available: `sign-transaction`, `build-block`, `mine-block`, and `submit-block`. Run `gitchain --help` for options.
 
-Identity and keypair commands create their output file exclusively with owner-only permissions and do not print private keys. The key file is still plaintext; protect it and use secure key storage for real secrets.
+Identity and keypair commands prompt for a passphrase and write an encrypted file with owner-only permissions. Existing plaintext identity files can be migrated with `gitchain protect-identity old.json --output protected.json`.
 
 To bind beyond localhost, configure a strong API token. Production mode requires the token and disables interactive API documentation:
 
@@ -91,4 +93,4 @@ HTTP endpoints include `GET /health/live`, `GET /health/ready`, `GET /chain/stat
 - `goc_core.access_request(...)`, `access_grant(...)`, `access_revoke(...)`
 - `goc_core.Engine(...).submit_block(...)`, `.status()`, `.tip_hash()`, `.tip_height()`, `.locator()`, `.get_block_json(...)`, `.blocks_after_common_ancestor_json(...)`
 
-**Deployment status:** not deployed. This version is a single-node local chain; it has no peer networking or role-based transaction authorization, and identity files contain plaintext private keys. Keep it on localhost until those needs and the native engine build are independently validated.
+**Deployment status:** not deployed. This version is a single-node local chain with a fixed genesis target and stateful role checks. It has no peer networking and has not had an independent security audit; keep it on localhost until a network protocol and deployment model are defined and reviewed.
