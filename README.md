@@ -14,7 +14,7 @@ The code uses exact integer arithmetic (`boost::multiprecision::cpp_int`) and an
 
 ## Install
 
-The pybind11 extension is built with setuptools; CMake is not used. Install native development packages first.
+The pybind11 extension is built with setuptools. Install native development packages first.
 
 Fedora:
 
