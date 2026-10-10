@@ -70,22 +70,18 @@ bool Consensus::receiveBlock(const Block& b,std::string* reason) {
     std::lock_guard<std::mutex> lock(mutex_);
     if(!validateBlock(b,reason))return false;
     if(readBlock(b.hash_hex)){setError(reason,"Block already known");return true;}
+    const bool extends_tip = (b.header.height==0 && tip_hash_.empty()) || (!tip_hash_.empty() && b.header.previous_hash==tip_hash_);
+    if(!extends_tip){setError(reason,"Block must extend the current chain tip");return false;}
     BigInt parent_score=0;
     if(b.header.height>0) parent_score=readScore(b.header.previous_hash);
     BigInt score;
     try { score=parent_score+Crypto::blockScore(b.header.target_hex,b.hash_hex); }
     catch(const std::exception& e){setError(reason,e.what());return false;}
     persistCandidate(b,b.hash_hex,b.header.previous_hash,score);
-    const bool extends_tip = (b.header.height==0 && tip_hash_.empty()) || (!tip_hash_.empty() && b.header.previous_hash==tip_hash_);
-    if(extends_tip) {
-        rocksdb::WriteBatch batch; batch.Put(canonicalKey(b.header.height),b.hash_hex); batch.Put("meta:tip_hash",b.hash_hex); batch.Put("meta:tip_height",std::to_string(b.header.height));
-        auto status=db_->Write(rocksdb::WriteOptions(),&batch); if(!status.ok())throw std::runtime_error("Canonical index update failed: "+status.ToString());
-        tip_hash_=b.hash_hex; tip_height_=b.header.height; tip_score_=score;
-        if(projection_) projection_->applyCanonicalBlock(b);
-    } else if(score>tip_score_) {
-        // Do not silently switch a branch while PostgreSQL cannot yet reverse/replay state safely.
-        setError(reason,"Higher-scoring competing branch stored, but automatic reorganization is not implemented yet");
-    }
+    rocksdb::WriteBatch batch; batch.Put(canonicalKey(b.header.height),b.hash_hex); batch.Put("meta:tip_hash",b.hash_hex); batch.Put("meta:tip_height",std::to_string(b.header.height));
+    auto status=db_->Write(rocksdb::WriteOptions(),&batch); if(!status.ok())throw std::runtime_error("Canonical index update failed: "+status.ToString());
+    tip_hash_=b.hash_hex; tip_height_=b.header.height; tip_score_=score;
+    if(projection_) projection_->applyCanonicalBlock(b);
     return true;
 }
 std::vector<std::string> Consensus::getLocator(std::size_t max_entries) const {

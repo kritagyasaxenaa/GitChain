@@ -1,8 +1,8 @@
 # GitChain
 
-GitChain is a C++20 chain engine exposed to Python through pybind11, with a FastAPI service and a command-line interface. It is an experimental prototype, not production-ready blockchain software. L1 and L2 must use distinct chain IDs and RocksDB directories.
+GitChain is an undeployed local-chain application with a C++20 engine, pybind11 module, command-line interface, and FastAPI service. It stores one sequential chain in RocksDB. Use a distinct chain ID and database directory for each chain.
 
-## Fork-choice score
+## Simple chain
 
 For each valid block, with 256-bit target `T` and block hash integer `h`:
 
@@ -10,7 +10,7 @@ For each valid block, with 256-bit target `T` and block hash integer `h`:
 
 `chain_score = sum(block_score)`
 
-The code uses exact integer arithmetic (`boost::multiprecision::cpp_int`) and an integer square root. A node chooses the valid branch with the greatest accumulated score. Equal scores retain the current branch. This is a custom rule, not standard accumulated proof-of-work.
+The code uses exact integer arithmetic (`boost::multiprecision::cpp_int`) and an integer square root. Blocks must extend the current tip; side branches are rejected. The score is reported for the linear chain and is not used to switch branches.
 
 ## Install
 
@@ -39,17 +39,7 @@ python -m pip install .
 
 This builds and installs `goc_core` and the `gitchain` command. `python -m pip install -r requirements-api.txt` installs the project from a checkout as well.
 
-## Important limitations to resolve before connecting untrusted peers
-
-1. **Networking is not implemented.** `CreateBlock::encode`, locators, and block-serving helpers provide a boundary for a P2P transport layer; they do not broadcast or open peer connections themselves.
-2. **Reorganizations are not implemented end-to-end.** Competing blocks are retained, but the canonical index and PostgreSQL projection are only advanced for direct tip extensions. The code intentionally refuses to silently reorganize PostgreSQL state. Implement branch switching plus undo/replay before treating competing-branch handling as complete.
-3. **Transaction authorization is incomplete.** Signatures are checked, but operation-specific role/permission validation against the parent chain state is not implemented. PostgreSQL must not be the authority for consensus validation.
-4. **Transaction signing convention:** sign `transactionToJson(tx)` after clearing `signature_hex`; use `Crypto::signTransaction` to create that signature. The block producer signs the final block hash after mining.
-5. **Target policy is incomplete.** This prototype accepts the target in each block. A real protocol must define how target values are selected and validated; otherwise peers can submit easy targets.
-6. **Identity persistence is incomplete.** The CLI writes plaintext private keys to owner-only files; use secure key storage for real secrets. Username uniqueness and registration policy need consensus validation.
-7. **PostgreSQL rollback is deliberately not implemented.** `rollbackBlock` throws after updating projection metadata because reversing application state safely requires undo data. Do not enable automatic reorgs until this is replaced.
-8. **Consensus hashing format is protocol-critical.** Header serialization uses ordered JSON fields. Once nodes are deployed, never change serialization without a protocol/version change.
-9. **Hash serialization is protocol-critical.** This scaffold hashes the canonical header, transaction array, and producer public key. A production implementation should add protocol versioning and test vectors before nodes are deployed.
+This is a local, single-chain implementation. It does not connect to peers or switch to competing branches. Transactions are signature-checked, but repository roles and permissions are not enforced by consensus. Keep private-key files secure; the CLI stores them as plaintext with owner-only permissions. Do not expose the node to untrusted networks or use it to protect valuable assets.
 
 ## File map
 
@@ -60,8 +50,6 @@ This builds and installs `goc_core` and the `gitchain` command. `python -m pip i
 - `src/Consensus.cpp` — validation, RocksDB storage, score accumulation, locators
 - `src/AccessControl.cpp` — access request/grant/revoke transaction construction
 - `src/UserReg.cpp` — local key generation and registration transaction construction
-
-This scaffold is intended to be reviewed and completed module by module. Do not run it on a public network or treat it as secure yet.
 
 ## CLI and FastAPI
 
@@ -103,4 +91,4 @@ HTTP endpoints include `GET /health/live`, `GET /health/ready`, `GET /chain/stat
 - `goc_core.access_request(...)`, `access_grant(...)`, `access_revoke(...)`
 - `goc_core.Engine(...).submit_block(...)`, `.status()`, `.tip_hash()`, `.tip_height()`, `.locator()`, `.get_block_json(...)`, `.blocks_after_common_ancestor_json(...)`
 
-**Security warning:** this is a development prototype. Do not expose it to untrusted peers or use it to protect valuable assets. Operation-specific authorization, target-policy validation, canonical-chain reorganization with PostgreSQL rollback/replay, peer networking, and secure persistent key management are incomplete. These consensus and state-management gaps must be resolved and independently reviewed before the blockchain can be considered production-ready.
+**Deployment status:** not deployed. This version is a single-node local chain; it has no peer networking or role-based transaction authorization, and identity files contain plaintext private keys. Keep it on localhost until those needs and the native engine build are independently validated.
