@@ -178,45 +178,146 @@ void Consensus::loadState() {
     state_=std::move(restored);
 }
 bool Consensus::persistCandidate(const Block& b,const std::string& hash,const std::string& parent_hash,const BigInt& score) {
-    rocksdb::WriteBatch batch; batch.Put(blockKey(hash),blockToJson(b).dump()); batch.Put(scoreKey(hash),scoreString(score)); batch.Put("parent:"+hash,parent_hash);
-    batch.Put(canonicalKey(b.header.height),hash); batch.Put("meta:tip_hash",hash); batch.Put("meta:tip_height",std::to_string(b.header.height));
-    // All nodes use integer sqrt and sum; the score is persisted as a decimal integer.
+    rocksdb::WriteBatch batch;
+    batch.Put(blockKey(hash),blockToJson(b).dump());
+    batch.Put(scoreKey(hash),scoreString(score));
+    batch.Put("parent:"+hash,parent_hash);
     auto status=db_->Write(rocksdb::WriteOptions(),&batch); if(!status.ok())throw std::runtime_error("RocksDB write failed: "+status.ToString()); return true;
 }
-void Consensus::recomputeCanonicalTip() {
-    // This prototype keeps candidate branches, but automatic PostgreSQL state rollback/replay is intentionally
-    // not claimed complete. Canonical index is updated only for an extension of the current tip below.
+
+Consensus::ChainState Consensus::stateThrough(const std::string& hash) const {
+    std::vector<Block> branch;
+    std::string current = hash;
+    while (!current.empty()) {
+        auto block = readBlock(current);
+        if (!block) throw std::runtime_error("Missing block while reconstructing branch state: " + current);
+        branch.push_back(*block);
+        current = block->header.previous_hash;
+    }
+    std::reverse(branch.begin(), branch.end());
+
+    ChainState restored;
+    std::string expected_parent;
+    for (std::size_t height = 0; height < branch.size(); ++height) {
+        const auto& block = branch[height];
+        std::string reason;
+        if (block.header.height != height || block.header.previous_hash != expected_parent ||
+            !validateBlock(block, &reason) || !applyTransactions(block, restored, &reason)) {
+            throw std::runtime_error("Stored branch is invalid at height " + std::to_string(height) +
+                                     (reason.empty() ? std::string{} : ": " + reason));
+        }
+        expected_parent = block.hash_hex;
+    }
+    return restored;
 }
+
+bool Consensus::selectCanonicalTip(const Block& candidate, const BigInt& score, ChainState state) {
+    const auto& hash = candidate.hash_hex;
+    std::vector<std::string> branch;
+    std::string current = hash;
+    while (!current.empty()) {
+        branch.push_back(current);
+        if (current == hash) {
+            current = candidate.header.previous_hash;
+        } else {
+            auto block = readBlock(current);
+            if (!block) throw std::runtime_error("Missing block while selecting canonical tip: " + current);
+            current = block->header.previous_hash;
+        }
+    }
+    std::reverse(branch.begin(), branch.end());
+
+    rocksdb::WriteBatch batch;
+    batch.Put(blockKey(hash), blockToJson(candidate).dump());
+    batch.Put(scoreKey(hash), scoreString(score));
+    batch.Put("parent:" + hash, candidate.header.previous_hash);
+    for (std::size_t height = 0; height < branch.size(); ++height)
+        batch.Put(canonicalKey(height), branch[height]);
+    for (std::uint64_t height = static_cast<std::uint64_t>(branch.size()); height <= tip_height_ && !tip_hash_.empty(); ++height)
+        batch.Delete(canonicalKey(height));
+    batch.Put("meta:tip_hash", hash);
+    batch.Put("meta:tip_height", std::to_string(branch.size() - 1));
+    auto status = db_->Write(rocksdb::WriteOptions(), &batch);
+    if (!status.ok()) throw std::runtime_error("RocksDB canonical-chain write failed: " + status.ToString());
+
+    tip_hash_ = hash;
+    tip_height_ = static_cast<std::uint64_t>(branch.size() - 1);
+    tip_score_ = score;
+    state_ = std::move(state);
+    return true;
+}
+
 bool Consensus::receiveBlock(const Block& b,std::string* reason) {
     std::lock_guard<std::mutex> lock(mutex_);
     if(!validateBlock(b,reason))return false;
     if(readBlock(b.hash_hex)){setError(reason,"Block already known");return true;}
-    const bool extends_tip = (b.header.height==0 && tip_hash_.empty()) || (!tip_hash_.empty() && b.header.previous_hash==tip_hash_);
-    if(!extends_tip){setError(reason,"Block must extend the current chain tip");return false;}
-    ChainState next_state=state_;
+
+    ChainState next_state;
+    if (b.header.height == 0) {
+        if (!tip_hash_.empty()) { setError(reason, "Genesis block conflicts with the established chain"); return false; }
+    } else if (b.header.previous_hash == tip_hash_) {
+        next_state = state_;
+    } else {
+        try { next_state = stateThrough(b.header.previous_hash); }
+        catch (const std::exception& error) { setError(reason, error.what()); return false; }
+    }
     if(!applyTransactions(b,next_state,reason))return false;
     BigInt parent_score=0;
     if(b.header.height>0) parent_score=readScore(b.header.previous_hash);
     BigInt score;
     try { score=parent_score+Crypto::blockScore(b.header.target_hex,b.hash_hex); }
     catch(const std::exception& e){setError(reason,e.what());return false;}
-    persistCandidate(b,b.hash_hex,b.header.previous_hash,score);
-    tip_hash_=b.hash_hex; tip_height_=b.header.height; tip_score_=score;
-    state_=std::move(next_state);
-    if(projection_) projection_->applyCanonicalBlock(b);
+    const bool extends_tip = tip_hash_.empty() ? b.header.height == 0 : b.header.previous_hash == tip_hash_;
+    const bool wins_tie = !tip_hash_.empty() && score == tip_score_ && b.hash_hex < tip_hash_;
+    if (tip_hash_.empty() || score > tip_score_ || wins_tie) {
+        if (projection_ && !extends_tip) {
+            setError(reason, "Cannot reorganize while a PostgreSQL projection is configured; disable PostgreSQL on P2P nodes");
+            return false;
+        }
+        selectCanonicalTip(b, score, std::move(next_state));
+        if (projection_) projection_->applyCanonicalBlock(b);
+    } else persistCandidate(b,b.hash_hex,b.header.previous_hash,score);
     return true;
 }
 std::vector<std::string> Consensus::getLocator(std::size_t max_entries) const {
-    std::lock_guard<std::mutex> lock(mutex_); std::vector<std::string> out; if(tip_hash_.empty())return out;
-    std::string current=tip_hash_; std::uint64_t height=tip_height_; std::uint64_t step=1;
-    while(out.size()<max_entries){out.push_back(current);if(height==0)break; auto b=readBlock(current);if(!b)break;current=b->header.previous_hash;--height;if(out.size()>10)step=2; if(step>1 && height>0){for(std::uint64_t j=1;j<step;++j){auto p=readBlock(current);if(!p)break;current=p->header.previous_hash;--height;}step*=2;}}
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::string> out;
+    if(tip_hash_.empty() || max_entries == 0)return out;
+    std::string current=tip_hash_;
+    std::uint64_t height=tip_height_;
+    std::uint64_t step=1;
+    while(out.size()<max_entries){
+        out.push_back(current);
+        if(height==0)break;
+        if(out.size()>10 && step<=UINT64_MAX/2)step*=2;
+        height=height>step?height-step:0;
+        if(!db_->Get(rocksdb::ReadOptions(),canonicalKey(height),&current).ok())break;
+    }
+    if (max_entries > 1 && !out.empty()) {
+        std::string genesis;
+        if (db_->Get(rocksdb::ReadOptions(), canonicalKey(0), &genesis).ok() && out.back() != genesis) {
+            if (out.size() == max_entries) out.back() = genesis;
+            else out.push_back(genesis);
+        }
+    }
     return out;
 }
-std::vector<Block> Consensus::blocksAfterCommonAncestor(const std::vector<std::string>& locator) const {
+std::vector<Block> Consensus::blocksAfterCommonAncestor(const std::vector<std::string>& locator,std::size_t max_blocks) const {
     std::lock_guard<std::mutex> lock(mutex_); std::string ancestor;
-    for(const auto& hash:locator){std::string canonical; if(db_->Get(rocksdb::ReadOptions(),canonicalKey(readBlock(hash)?readBlock(hash)->header.height:UINT64_MAX),&canonical).ok()&&canonical==hash){ancestor=hash;break;}}
+    for(const auto& hash:locator){
+        auto block=readBlock(hash);
+        if(!block)continue;
+        std::string canonical;
+        if(db_->Get(rocksdb::ReadOptions(),canonicalKey(block->header.height),&canonical).ok()&&canonical==hash){ancestor=hash;break;}
+    }
     std::uint64_t start=0;if(!ancestor.empty()){auto a=readBlock(ancestor);start=a->header.height+1;}
-    std::vector<Block> result;for(std::uint64_t h=start;h<=tip_height_&&!tip_hash_.empty();++h){std::string hash;if(!db_->Get(rocksdb::ReadOptions(),canonicalKey(h),&hash).ok())break;auto b=readBlock(hash);if(b)result.push_back(*b);}
+    std::vector<Block> result;
+    for(std::uint64_t h=start;h<=tip_height_&&!tip_hash_.empty()&&result.size()<max_blocks;++h){
+        std::string hash;
+        if(!db_->Get(rocksdb::ReadOptions(),canonicalKey(h),&hash).ok())break;
+        auto b=readBlock(hash);
+        if(b)result.push_back(*b);
+    }
     return result;
 }
 }

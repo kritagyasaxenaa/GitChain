@@ -77,9 +77,9 @@ public:
         return goc::blockToJson(*block).dump();
     }
 
-    std::string blocksAfter(const std::vector<std::string>& locator_hashes) const {
+    std::string blocksAfter(const std::vector<std::string>& locator_hashes, std::size_t max_blocks) const {
         json result = json::array();
-        for (const auto& block : consensus_->blocksAfterCommonAncestor(locator_hashes))
+        for (const auto& block : consensus_->blocksAfterCommonAncestor(locator_hashes, max_blocks))
             result.push_back(goc::blockToJson(block));
         return result.dump();
     }
@@ -178,5 +178,6 @@ PYBIND11_MODULE(goc_core, m) {
         .def("tip_height", &Engine::tipHeight)
         .def("locator", &Engine::locator, py::arg("max_entries") = 32)
         .def("get_block_json", &Engine::getBlockJson, py::arg("hash"))
-        .def("blocks_after_common_ancestor_json", &Engine::blocksAfter, py::arg("locator_hashes"));
+        .def("blocks_after_common_ancestor_json", &Engine::blocksAfter,
+             py::arg("locator_hashes"), py::arg("max_blocks") = 512);
 }
