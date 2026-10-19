@@ -21,7 +21,6 @@ COPY . .
 RUN python -m pip install --no-cache-dir . \
     && chmod +x /app/docker-entrypoint.sh
 
-VOLUME ["/data"]
 EXPOSE 8000
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["sh", "-c", "exec gitchain serve --host 0.0.0.0 --port ${PORT:-8000}"]
