@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fastapi.testclient import TestClient
+import httpx
 
 from gitchain.api import create_app
 from gitchain.cli import (
@@ -36,7 +36,7 @@ class FakeEngine:
             return json.dumps({"hash_hex": block_hash})
         return "null"
 
-    def blocks_after_common_ancestor_json(self, locator):
+    def blocks_after_common_ancestor_json(self, locator, max_blocks=512):
         return json.dumps([{"hash_hex": "b" * 64}])
 
     def submit_block(self, block_json):
@@ -48,51 +48,92 @@ class FakeEngine:
         }
 
 
-class ApiTests(unittest.TestCase):
-    def setUp(self):
+class ApiTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
         settings = Settings(environment="test", api_token="test-token")
-        self.client_context = TestClient(
-            create_app(settings, engine_factory=lambda _: FakeEngine())
+        self.app = create_app(settings, engine_factory=lambda _: FakeEngine())
+        self.lifespan = self.app.router.lifespan_context(self.app)
+        await self.lifespan.__aenter__()
+        self.client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=self.app), base_url="http://test"
         )
-        self.client = self.client_context.__enter__()
 
-    def tearDown(self):
-        self.client_context.__exit__(None, None, None)
+    async def asyncTearDown(self):
+        await self.client.aclose()
+        await self.lifespan.__aexit__(None, None, None)
 
-    def test_health_chain_and_sync_routes(self):
-        self.assertEqual(self.client.get("/health/live").json(), {"status": "ok"})
-        self.assertEqual(self.client.get("/health/ready").status_code, 200)
-        self.assertEqual(self.client.get("/chain/status").json()["chain_id"], "test-chain")
-        self.assertEqual(self.client.get("/chain/locator").json()["locator"], ["a" * 64])
-        blocks = self.client.post("/chain/blocks-after", json={"locator": ["a" * 64]})
+    async def test_health_chain_and_sync_routes(self):
+        self.assertEqual((await self.client.get("/health/live")).json(), {"status": "ok"})
+        self.assertEqual((await self.client.get("/health/ready")).status_code, 200)
+        self.assertEqual((await self.client.get("/chain/status")).json()["chain_id"], "test-chain")
+        self.assertEqual((await self.client.get("/chain/locator")).json()["locator"], ["a" * 64])
+        blocks = await self.client.post("/chain/blocks-after", json={"locator": ["a" * 64]})
         self.assertEqual(blocks.json(), [{"hash_hex": "b" * 64}])
 
-    def test_block_read_and_write_auth(self):
-        found = self.client.get(f"/blocks/{'a' * 64}")
-        missing = self.client.get(f"/blocks/{'c' * 64}")
+    async def test_block_read_and_write_auth(self):
+        found = await self.client.get(f"/blocks/{'a' * 64}")
+        missing = await self.client.get(f"/blocks/{'c' * 64}")
         self.assertEqual(found.status_code, 200)
         self.assertEqual(missing.status_code, 404)
-        self.assertEqual(self.client.post("/blocks", json={"block": {"valid": True}}).status_code, 401)
-        accepted = self.client.post(
+        self.assertEqual((await self.client.post("/blocks", json={"block": {"valid": True, "transactions": []}})).status_code, 401)
+        accepted = await self.client.post(
             "/blocks",
-            json={"block": {"valid": True}},
+            json={"block": {"valid": True, "transactions": []}},
             headers={"Authorization": "Bearer test-token"},
         )
-        rejected = self.client.post(
+        rejected = await self.client.post(
             "/blocks",
-            json={"block": {"valid": False}},
+            json={"block": {"valid": False, "transactions": []}},
             headers={"Authorization": "Bearer test-token"},
         )
         self.assertEqual(accepted.status_code, 200)
         self.assertEqual(rejected.status_code, 422)
 
-    def test_input_validation(self):
-        self.assertEqual(self.client.get("/chain/locator?limit=257").status_code, 422)
-        self.assertEqual(self.client.get("/blocks/not-a-hash").status_code, 422)
-        self.assertEqual(self.client.post("/chain/blocks-after", json={"locator": ["x"] * 257}).status_code, 422)
+    async def test_peer_ingress_requires_enabled_peer_mode(self):
+        settings = Settings(environment="test", p2p_enabled=True)
+        app = create_app(settings, engine_factory=lambda _: FakeEngine())
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                response = await client.post("/peer/blocks", json={"block": {"valid": True, "transactions": []}})
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(response.json()["accepted"])
+
+    async def test_input_validation(self):
+        self.assertEqual((await self.client.get("/chain/locator?limit=257")).status_code, 422)
+        self.assertEqual((await self.client.get("/blocks/not-a-hash")).status_code, 422)
+        self.assertEqual((await self.client.post("/chain/blocks-after", json={"locator": ["x"] * 257})).status_code, 422)
+        self.assertEqual((await self.client.post("/chain/blocks-after", json={"locator": [], "limit": 513})).status_code, 422)
+        self.assertEqual((await self.client.post("/peer/blocks", json={"block": {"transactions": []}})).status_code, 404)
+        too_many_transactions = await self.client.post(
+            "/blocks", json={"block": {"transactions": [{}] * 1001}}, headers={"Authorization": "Bearer test-token"}
+        )
+        too_large = await self.client.post(
+            "/chain/blocks-after",
+            content=b" " * (2 * 1024 * 1024 + 1),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(too_many_transactions.status_code, 422)
+        self.assertEqual(too_large.status_code, 413)
 
 
 class CliTests(unittest.TestCase):
+    def test_p2p_configuration_requires_supported_storage_and_peer_urls(self):
+        settings = Settings(
+            environment="production",
+            api_token="node-token",
+            p2p_enabled=True,
+            peers=("https://seed.example",),
+        )
+        self.assertTrue(settings.p2p_enabled)
+        with self.assertRaisesRegex(ValueError, "PostgreSQL projection"):
+            Settings(p2p_enabled=True, postgres_dsn="postgresql://db")
+        with self.assertRaisesRegex(ValueError, r"base HTTP\(S\) URLs"):
+            Settings(p2p_enabled=True, peers=("seed.example",))
+        with self.assertRaisesRegex(ValueError, "HTTPS"):
+            Settings(environment="production", api_token="node-token", p2p_enabled=True, peers=("http://seed.example",))
+
     def test_external_bind_addresses_are_not_loopback(self):
         self.assertTrue(_is_loopback("127.0.0.1"))
         self.assertTrue(_is_loopback("::1"))
@@ -270,6 +311,40 @@ class NativeConsensusTests(unittest.TestCase):
 
         changed_target = self.mine_and_submit(7, parent_hash, [], self.alice, "e" * 64)
         self.assertFalse(changed_target[1]["accepted"])
+
+    def test_accumulated_work_selects_a_heavier_fork_and_recovers(self):
+        self.alice = self.new_keys()
+        bob = self.new_keys()
+
+        genesis, result = self.mine_and_submit(0, "")
+        self.assertTrue(result["accepted"])
+        genesis_hash = genesis["hash_hex"]
+
+        first_a, result = self.mine_and_submit(1, genesis_hash, producer_keys=self.alice)
+        self.assertTrue(result["accepted"])
+        second_a, result = self.mine_and_submit(2, first_a["hash_hex"], producer_keys=self.alice)
+        self.assertTrue(result["accepted"])
+        self.assertEqual(self.engine.tip_hash(), second_a["hash_hex"])
+
+        first_b, result = self.mine_and_submit(1, genesis_hash, producer_keys=bob)
+        self.assertTrue(result["accepted"])
+        parent_hash = first_b["hash_hex"]
+        for height in range(2, 7):
+            block, result = self.mine_and_submit(height, parent_hash, producer_keys=bob)
+            self.assertTrue(result["accepted"])
+            parent_hash = block["hash_hex"]
+        self.assertEqual(self.engine.tip_hash(), parent_hash)
+        self.assertEqual(self.engine.tip_height(), 6)
+        self.assertEqual(self.engine.locator(2)[-1], genesis_hash)
+        self.assertEqual(len(json.loads(self.engine.blocks_after_common_ancestor_json([genesis_hash], 2))), 2)
+        self.assertIsNotNone(json.loads(self.engine.get_block_json(second_a["hash_hex"])))
+
+        self.engine = None
+        import gc
+
+        gc.collect()
+        self.engine = goc_core.Engine(self.chain_path, "authorization-test", "L1", "")
+        self.assertEqual(self.engine.tip_hash(), parent_hash)
 
 
 if __name__ == "__main__":

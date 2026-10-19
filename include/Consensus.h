@@ -22,7 +22,8 @@ public:
     std::uint64_t tipHeight() const;
     BigInt accumulatedScore() const;
     // Peer transport is intentionally injected by the application; these return the data a peer needs.
-    std::vector<Block> blocksAfterCommonAncestor(const std::vector<std::string>& locator) const;
+    std::vector<Block> blocksAfterCommonAncestor(const std::vector<std::string>& locator,
+                                                 std::size_t max_blocks = 512) const;
 private:
     rocksdb::DB* db_{nullptr};
     std::string chain_id_;
@@ -35,7 +36,6 @@ private:
     bool validateBlock(const Block& block, std::string* reason) const;
     bool persistCandidate(const Block& block, const std::string& hash, const std::string& parent_hash, const BigInt& score);
     void loadTip();
-    void recomputeCanonicalTip();
     void setError(std::string* reason, const std::string& message) const;
     std::string blockKey(const std::string& hash) const;
     std::string scoreKey(const std::string& hash) const;
@@ -49,6 +49,8 @@ private:
     };
     ChainState state_;
     bool applyTransactions(const Block& block, ChainState& state, std::string* reason) const;
+    ChainState stateThrough(const std::string& hash) const;
+    bool selectCanonicalTip(const Block& candidate, const BigInt& score, ChainState state);
     void loadState();
 };
 }
