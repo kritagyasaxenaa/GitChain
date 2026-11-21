@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GitChain | Decentralized Git Blockchain Explorer & Node Studio</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⛓️</text></svg>">
+</head>
+<body>
+
+  <!-- Header -->
+  <header>
+    <a href="/" class="brand">
+      <div class="brand-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect>
+          <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path>
+        </svg>
+      </div>
+      <div class="brand-text">Git<span>Chain</span></div>
+      <div class="node-status-badge">
+        <span class="pulse-dot"></span>
+        <span>Node Online</span>
+      </div>
+    </a>
+
+    <div class="header-actions">
+      <!-- Quick Demo Seeder -->
+      <button class="btn btn-outline btn-sm" onclick="seedDemoChain()" title="Seed genesis, alice, and repo">
+        ⚡ Seed Demo Chain
+      </button>
+
+      <!-- Active Identity Pill -->
+      <div class="identity-pill" onclick="switchTab('identities')" title="Manage identities">
+        <div class="identity-avatar" id="active-identity-avatar">?</div>
+        <span id="active-identity-name">No Identity</span>
+      </div>
+
+      <!-- Auth Settings -->
+      <button class="btn btn-secondary btn-sm" onclick="openTokenModal()" title="Configure API Bearer Token">
+        🔑 Token
+      </button>
+
+      <!-- Refresh -->
+      <button class="btn btn-secondary btn-sm" onclick="refreshAll()" title="Refresh chain data">
+        🔄
+      </button>
+    </div>
+  </header>
+
+  <!-- Navigation Tabs -->
+  <nav class="nav-tabs">
+    <button class="tab-btn active" data-tab="explorer">
+      🌐 Chain Explorer
+    </button>
+    <button class="tab-btn" data-tab="miner">
+      ⛏️ Block Miner & PoW
+    </button>
+    <button class="tab-btn" data-tab="studio">
+      ✍️ Transaction Studio
+      <span class="tab-badge" id="mempool-count">0</span>
+    </button>
+    <button class="tab-btn" data-tab="identities">
+      🔐 Identity Vault
+    </button>
+    <button class="tab-btn" data-tab="diagnostics">
+      🩺 Node Diagnostics & API
+    </button>
+  </nav>
+
+  <!-- Main Content -->
+  <main>
+
+    <!-- Empty Chain Banner -->
+    <div id="empty-chain-alert" class="panel" style="display:none; margin-bottom:1.5rem; background:rgba(245, 158, 11, 0.08); border-color:rgba(245, 158, 11, 0.3);">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:1rem;">
+        <div>
+          <strong style="color:var(--accent-amber);">Chain is currently uninitialized (Genesis block missing).</strong>
+          <p style="font-size:0.85rem; color:var(--text-dim); margin-top:0.25rem;">
+            You can either click <strong>"Seed Demo Chain"</strong> to auto-produce genesis + demo transactions, or head to the <strong>Block Miner</strong> tab to craft and mine your custom genesis block.
+          </p>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="seedDemoChain()">Initialize with Demo Data</button>
+      </div>
+    </div>
+
+    <!-- TAB 1: CHAIN EXPLORER -->
+    <div id="tab-explorer" class="tab-content active">
+      <!-- Stats Grid -->
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-header">
+            <span class="stat-label">Tip Height</span>
+            <div class="stat-icon">#</div>
+          </div>
+          <div class="stat-value" id="stat-tip-height">#0</div>
+          <div class="stat-sub">Linear block index</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-header">
+            <span class="stat-label">Tip Block Hash</span>
+            <div class="stat-icon">⚓</div>
+          </div>
+          <div class="stat-value" id="stat-tip-hash" style="font-size:1.15rem;">None</div>
+          <div class="stat-sub">Canonical head of chain</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-header">
+            <span class="stat-label">Accumulated Score</span>
+            <div class="stat-icon">⚡</div>
+          </div>
+          <div class="stat-value" id="stat-chain-score" style="font-size:1.15rem;">0</div>
+          <div class="stat-sub">sum(floor(sqrt(T - h)))</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-header">
+            <span class="stat-label">Chain ID & Total Blocks</span>
+            <div class="stat-icon">📦</div>
+          </div>
+          <div class="stat-value">
+            <span id="stat-chain-id">L1</span> <span style="font-size:1rem; color:var(--text-muted);">(<span id="stat-total-blocks">0</span>)</span>
+          </div>
+          <div class="stat-sub">Single-node linear consensus</div>
+        </div>
+      </div>
+
+      <!-- Chain Visual Timeline -->
+      <div class="panel" style="margin-bottom:1.5rem;">
+        <div class="panel-header">
+          <h3 class="panel-title">🔗 Canonical Chain Graph</h3>
+          <span style="font-size:0.75rem; color:var(--text-muted);">Horizontal chain progression (Tip on left)</span>
+        </div>
+        <div class="chain-timeline" id="chain-timeline"></div>
+      </div>
+
+      <!-- Blocks Table -->
+      <div class="card-table-wrapper">
+        <div style="padding:1rem 1.25rem; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:1rem; border-bottom:1px solid var(--border-color);">
+          <h3 class="panel-title">📜 Blocks Ledger</h3>
+          <div class="search-box">
+            <span>🔍</span>
+            <input type="text" id="block-search-input" placeholder="Search by height or hash...">
+          </div>
+        </div>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Height</th>
+                <th>Hash</th>
+                <th>Previous Hash</th>
+                <th>Transactions</th>
+                <th>Nonce</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="blocks-table-body">
+              <tr><td colspan="6" style="text-align:center; padding:2rem; color:var(--text-muted);">Loading blocks...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 2: BLOCK MINER -->
+    <div id="tab-miner" class="tab-content">
+      <div class="split-grid">
+        <div class="panel">
+          <div class="panel-header">
+            <h3 class="panel-title">⛏️ Proof-of-Work Miner</h3>
+            <span class="badge badge-green">Target: floor(sqrt(T - h))</span>
+          </div>
+
+          <div class="miner-reactor" id="miner-reactor">
+            <div class="stat-label">PoW Engine Status</div>
+            <div class="reactor-gauge" id="mining-gauge">READY</div>
+            <div class="reactor-hash" id="mining-hash-preview">Nonce search will be performed here</div>
+            <div style="font-size:0.8rem; color:var(--text-dim);" id="mining-status-ticker">Waiting for mining initiation</div>
+          </div>
+
+          <button class="btn btn-primary" id="btn-mine-block" style="width:100%; padding:0.85rem;" onclick="startMining()">
+            🔨 Mine & Submit Block to Chain
+          </button>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <h3 class="panel-title">⚙️ Candidate Block Parameters</h3>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Block Height</label>
+            <input type="number" id="mine-height" class="form-input mono" value="0">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Previous Hash (empty for Genesis #0)</label>
+            <input type="text" id="mine-prev-hash" class="form-input mono" placeholder="Parent block hash hex">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Block Producer Identity</label>
+            <select id="mine-producer-select" class="form-select"></select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Proof-of-Work Target (64 Hex chars)</label>
+            <input type="text" id="mine-target" class="form-input mono" value="ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Max Attempts Limit</label>
+            <input type="number" id="mine-attempts" class="form-input mono" value="100000">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 3: TRANSACTION STUDIO -->
+    <div id="tab-studio" class="tab-content">
+      <div class="split-grid">
+        <div class="panel">
+          <div class="panel-header">
+            <h3 class="panel-title">✍️ Transaction Crafter & Signer</h3>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Signer / Actor Identity</label>
+            <select id="tx-actor-select" class="form-select"></select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Operation Type</label>
+            <select id="tx-op-select" class="form-select" onchange="onTxOperationChange()">
+              <option value="USER_CREATE">👤 USER_CREATE (Register User on Chain)</option>
+              <option value="REPO_CREATE">📁 REPO_CREATE (Create New Git Repository)</option>
+              <option value="FILE_CHANGE">📝 FILE_CHANGE (Commit File / Path Change)</option>
+              <option value="ACCESS_GRANT">🔑 ACCESS_GRANT (Grant Repo Access Role)</option>
+              <option value="ACCESS_REVOKE">🚫 ACCESS_REVOKE (Revoke Repo Access Role)</option>
+            </select>
+          </div>
+
+          <div id="tx-dynamic-fields">
+            <div class="form-group">
+              <label class="form-label">Username to Register</label>
+              <input type="text" id="tx-user-name" class="form-input" placeholder="e.g. alice">
+            </div>
+          </div>
+
+          <button class="btn btn-primary" style="width:100%; margin-top:0.75rem;" onclick="signAndStageTx()">
+            ✍️ Sign ECDSA Transaction & Stage in Mempool
+          </button>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <h3 class="panel-title">📥 Pending Mempool (Ready for Next Block)</h3>
+            <button class="btn btn-secondary btn-sm" onclick="clearMempool()">Clear All</button>
+          </div>
+          <div id="mempool-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 4: IDENTITIES -->
+    <div id="tab-identities" class="tab-content">
+      <div class="split-grid">
+        <div class="panel">
+          <div class="panel-header">
+            <h3 class="panel-title">➕ Generate New Local Identity</h3>
+          </div>
+          <p style="font-size:0.85rem; color:var(--text-dim); margin-bottom:1rem;">
+            Generates a standard SECP256R1 (P-256) ECDSA cryptographic keypair and computes its canonical SHA-256 Identity ID.
+          </p>
+          <div class="form-group">
+            <label class="form-label">Username</label>
+            <input type="text" id="new-identity-username" class="form-input" placeholder="e.g. alice, bob, charlie">
+          </div>
+          <button class="btn btn-primary" onclick="createNewIdentity()">
+            🔐 Generate Identity Keypair
+          </button>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <h3 class="panel-title">👥 Stored Vault Identities</h3>
+          </div>
+          <div id="identities-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 5: DIAGNOSTICS & API -->
+    <div id="tab-diagnostics" class="tab-content">
+      <div class="split-grid">
+        <div class="panel">
+          <div class="panel-header">
+            <h3 class="panel-title">🩺 Node Health & Endpoints</h3>
+          </div>
+          <div class="kv-list">
+            <div class="kv-item">
+              <span class="kv-key">Liveness Check</span>
+              <span class="kv-val"><a href="/health/live" target="_blank" class="badge badge-green">/health/live ↗</a></span>
+            </div>
+            <div class="kv-item">
+              <span class="kv-key">Readiness Check</span>
+              <span class="kv-val"><a href="/health/ready" target="_blank" class="badge badge-green">/health/ready ↗</a></span>
+            </div>
+            <div class="kv-item">
+              <span class="kv-key">Chain Status</span>
+              <span class="kv-val"><a href="/chain/status" target="_blank" class="badge badge-blue">/chain/status ↗</a></span>
+            </div>
+            <div class="kv-item">
+              <span class="kv-key">Chain Locator</span>
+              <span class="kv-val"><a href="/chain/locator" target="_blank" class="badge badge-blue">/chain/locator ↗</a></span>
+            </div>
+            <div class="kv-item">
+              <span class="kv-key">OpenAPI Documentation</span>
+              <span class="kv-val"><a href="/docs" target="_blank" class="badge badge-purple">Swagger /docs ↗</a></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <h3 class="panel-title">📦 Manual Block Submission</h3>
+          </div>
+          <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:0.75rem;">
+            Submit a raw block JSON payload directly to <code>POST /blocks</code>.
+          </p>
+          <div class="form-group">
+            <textarea id="raw-block-json" class="form-textarea" style="min-height:160px;" placeholder='{ "header": { ... }, "transactions": [ ... ], ... }'></textarea>
+          </div>
+          <button class="btn btn-secondary" onclick="submitRawBlock()">Submit Block</button>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- Modal Block Details -->
+  <div class="modal-overlay" id="block-modal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 style="font-size:1.1rem; font-weight:600;">Block Inspector</h3>
+        <button class="btn btn-secondary btn-sm" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal-body" id="block-modal-body"></div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div id="toast-container"></div>
+
+  <!-- Footer -->
+  <footer>
+    GitChain v0.3.0 &bull; C++20 Consensus Engine with RocksDB &bull; FastAPI Service & Web Studio &bull;
+    <a href="/docs" target="_blank">API Docs</a>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

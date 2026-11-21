@@ -165,6 +165,7 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=_valid_port, default=8000)
     serve.add_argument("--log-level", choices=("critical", "error", "warning", "info", "debug"), default="info")
+    serve.add_argument("--allow-insecure", action="store_true", help="allow binding to external address without an API token (demo mode)")
 
     commands.add_parser("status", help="show the local chain tip")
     locator = commands.add_parser("locator", help="print a chain synchronization locator")
@@ -221,7 +222,12 @@ def _parser() -> argparse.ArgumentParser:
 def _run(args: argparse.Namespace) -> int:
     if args.command == "serve":
         settings = Settings.from_env()
-        if not _is_loopback(args.host) and not settings.api_token:
+        if (
+            not _is_loopback(args.host)
+            and not settings.api_token
+            and not getattr(args, "allow_insecure", False)
+            and os.getenv("GOC_ALLOW_INSECURE_BIND", "0") != "1"
+        ):
             raise ValueError("GOC_API_TOKEN is required when binding to a non-loopback address")
         import uvicorn
 

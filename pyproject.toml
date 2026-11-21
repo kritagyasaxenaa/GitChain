@@ -24,3 +24,6 @@ gitchain = "gitchain.cli:main"
 [tool.setuptools]
 package-dir = {"" = "."}
 packages = ["gitchain"]
+
+[tool.setuptools.package-data]
+gitchain = ["static/*"]

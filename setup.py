@@ -42,6 +42,8 @@ def pkg_config_flags(*packages: str) -> tuple[list[str], list[str], list[str], l
 setup(
     packages=["gitchain"],
     package_dir={"": "."},
+    package_data={"gitchain": ["static/*"]},
+    include_package_data=True,
     ext_modules=[
         Pybind11Extension(
             "goc_core",

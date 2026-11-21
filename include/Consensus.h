@@ -24,7 +24,7 @@ public:
     // Peer transport is intentionally injected by the application; these return the data a peer needs.
     std::vector<Block> blocksAfterCommonAncestor(const std::vector<std::string>& locator) const;
 private:
-    rocksdb::DB* db_{nullptr};
+    std::unique_ptr<rocksdb::DB> db_;
     std::string chain_id_;
     ChainType type_;
     PostGres* projection_;

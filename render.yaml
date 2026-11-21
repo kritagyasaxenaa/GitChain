@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: gitchain
+    runtime: docker
+    plan: free
+    dockerfilePath: Dockerfile
+    envVars:
+      - key: GOC_ENV
+        value: development
+      - key: GOC_ALLOW_INSECURE_BIND
+        value: "1"
+      - key: GOC_ROCKS_PATH
+        value: /data/l1
+      - key: GOC_CHAIN_ID
+        value: L1
+      - key: GOC_CHAIN_TYPE
+        value: L1

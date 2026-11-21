@@ -53,6 +53,34 @@ This is a local, single-chain implementation without peer networking. Consensus 
 - `src/AccessControl.cpp` — access request/grant/revoke transaction construction
 - `src/UserReg.cpp` — local key generation and registration transaction construction
 
+## Web UI Dashboard
+
+GitChain includes an interactive, zero-build web dashboard served directly at `http://localhost:8000/` (or `/ui`):
+
+- **🌐 Chain Explorer**: Real-time stats (Tip Height, Canonical Hash, Accumulated Score, Target), horizontal block timeline, searchable blocks ledger, and block inspection modal.
+- **⛏️ Block Miner & PoW Studio**: Mine blocks interactively with visual hash attempts, custom difficulty targets, and live score calculation $\lfloor\sqrt{T - h}\rfloor$.
+- **✍️ Transaction Studio**: Craft, sign, and stage ECDSA transactions (`USER_CREATE`, `REPO_CREATE`, `FILE_CHANGE`, `ACCESS_GRANT`, `ACCESS_REVOKE`) into the mempool.
+- **🔐 Identity Vault**: Generate P-256 keypairs, create named local identities, export/import JSON credentials, and switch active signers.
+- **⚡ Seed Demo Chain**: 1-click button to initialize genesis + demo user + repo + initial commit.
+
+Run the web service:
+
+```bash
+gitchain serve --host 127.0.0.1 --port 8000
+```
+Then visit `http://localhost:8000/` in your browser.
+
+## Free Cloud Hosting
+
+GitChain is containerized with Docker and can be hosted for **free** on:
+
+- **Render**: Free Docker web service with 1-click deploy ([render.yaml](render.yaml))
+- **Hugging Face Spaces**: Free 16 GB RAM + 2 vCPU Docker container
+- **Fly.io**: Free persistent volume storage for RocksDB ([fly.toml](fly.toml))
+- **Koyeb**: Free Eco tier web service
+
+See **[HOSTING.md](HOSTING.md)** for complete step-by-step free deployment guides.
+
 ## CLI and FastAPI
 
 The CLI reads `GOC_ROCKS_PATH` (default `./data/l1`), `GOC_CHAIN_ID` (default `L1`), `GOC_CHAIN_TYPE` (`L1` or `L2`), optional `GOC_POSTGRES_DSN`, `GOC_ENV`, and `GOC_API_TOKEN` from the environment.

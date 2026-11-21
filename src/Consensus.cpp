@@ -26,7 +26,7 @@ Consensus::Consensus(const std::string& path,std::string chain_id,ChainType type
     loadTip();
     loadState();
 }
-Consensus::~Consensus(){delete db_;}
+Consensus::~Consensus() = default;
 void Consensus::setError(std::string* out,const std::string& msg) const { if(out)*out=msg; }
 std::string Consensus::blockKey(const std::string& h) const { return "block:"+h; }
 std::string Consensus::scoreKey(const std::string& h) const { return "score:"+h; }

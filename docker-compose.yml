@@ -1,0 +1,21 @@
+services:
+  gitchain:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gitchain-node
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      - GOC_ROCKS_PATH=/data/l1
+      - GOC_CHAIN_ID=L1
+      - GOC_CHAIN_TYPE=L1
+      - GOC_ENV=development
+      - GOC_ALLOW_INSECURE_BIND=1
+    volumes:
+      - gitchain-data:/data/l1
+    restart: unless-stopped
+
+volumes:
+  gitchain-data:
